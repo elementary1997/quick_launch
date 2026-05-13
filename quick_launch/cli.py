@@ -33,16 +33,34 @@ _PROVIDER_KEY_FILE: dict[str, str] = {
 
 
 def _repo_name(url: str) -> str:
-    return url.rstrip("/").removesuffix(".git").split("/")[-1]
+    """Extract bare repo name from any URL form (strips /tree/... and .git)."""
+    import re
+    clean = re.sub(r"/tree/.*$", "", url.rstrip("/"))
+    return clean.removesuffix(".git").split("/")[-1]
 
 
 def _sandbox_path(url: str) -> Path:
     return config.SANDBOXES_DIR / _repo_name(url)
 
 
+def _work_dir(clone_dest: Path, subdir: str | None) -> Path:
+    """Return the directory where README/env/compose actually live."""
+    if subdir:
+        return clone_dest / subdir
+    return clone_dest
+
+
 def _resolve_path(url_or_name: str) -> Path:
+    """Resolve a URL or 'repo/subdir' name to an absolute sandbox path."""
     if "://" in url_or_name:
-        return _sandbox_path(url_or_name)
+        from quick_launch.providers.base import parse_tree_url
+        import re
+        host = re.search(r"://([^/]+)", url_or_name)
+        h = host.group(1) if host else ""
+        repo_url, _, subdir = parse_tree_url(url_or_name, h)
+        base = config.SANDBOXES_DIR / _repo_name(repo_url)
+        return base / subdir if subdir else base
+    # allow "repo-name/subdir" or just "repo-name"
     return config.SANDBOXES_DIR / url_or_name
 
 
@@ -81,41 +99,56 @@ def launch(
         auth_label = "[green]token[/green]"
     else:
         auth_label = "[yellow]none — public repo[/yellow]"
-    console.print(
-        Panel(
-            f"Provider : [bold]{provider.name}[/bold]\n"
-            f"Clone URL: {clone_result.display_url}\n"
-            f"Auth     : {auth_label}",
-            border_style="cyan",
-        )
-    )
+    info_lines = [
+        f"Provider : [bold]{provider.name}[/bold]",
+        f"Clone URL: {clone_result.display_url}",
+        f"Auth     : {auth_label}",
+    ]
+    if clone_result.branch:
+        info_lines.append(f"Branch   : {clone_result.branch}")
+    if clone_result.subdir:
+        info_lines.append(f"Subdir   : [cyan]{clone_result.subdir}[/cyan]")
+    console.print(Panel("\n".join(info_lines), border_style="cyan"))
 
     # 2. Clone
     console.print(Rule("2 / Clone"))
     config.SANDBOXES_DIR.mkdir(exist_ok=True)
-    dest = _sandbox_path(url)
+    clone_dest = _sandbox_path(url)
+    work = _work_dir(clone_dest, clone_result.subdir)
     try:
-        cloner.clone(clone_result.url, clone_result.display_url, dest, ssh_key=clone_result.ssh_key)
+        cloner.clone(
+            clone_result.url,
+            clone_result.display_url,
+            clone_dest,
+            ssh_key=clone_result.ssh_key,
+            branch=clone_result.branch,
+        )
     except Exception as e:
         console.print(f"[red]Clone failed: {e}[/red]")
         console.print(f"\n[dim]{provider.credential_hint()}[/dim]")
         raise typer.Exit(1)
 
+    if clone_result.subdir:
+        if not work.exists():
+            console.print(f"[red]Subdir not found in repo: {clone_result.subdir}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[dim]Working from subdir: {clone_result.subdir}[/dim]")
+
     # 3. README
     if not no_readme:
         console.print(Rule("3 / README"))
-        readme.display(dest)
+        readme.display(work)
 
     # 4. .env setup
     console.print(Rule("4 / Environment"))
-    env_manager.prepare(dest)
+    env_manager.prepare(work)
 
     # 5. Sandbox
     if no_sandbox:
         console.print("[dim]Skipping sandbox (--no-sandbox)[/dim]")
     else:
         console.print(Rule("5 / Sandbox"))
-        sandbox.up(dest, detach=not foreground)
+        sandbox.up(work, detach=not foreground)
 
     console.print(Rule("[bold green]Done[/bold green]"))
 

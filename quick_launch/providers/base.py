@@ -7,10 +7,28 @@ _SSH_KEY_NAMES = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"]
 
 @dataclass
 class CloneResult:
-    url: str                    # URL used for cloning
+    url: str                    # URL used for cloning (repo root)
     display_url: str            # URL safe to print (no secrets)
     has_auth: bool = False      # True when a real credential was found
     ssh_key: Path | None = None # Path to private key when using SSH auth
+    branch: str | None = None   # Specific branch to checkout (None = default)
+    subdir: str | None = None   # Subdir within repo to use as work dir
+
+
+def parse_tree_url(url: str, host: str) -> tuple[str, str | None, str | None]:
+    """
+    Split a browser-style /tree/<branch>/<path> URL into (repo_root_url, branch, subdir).
+    E.g. https://github.com/user/repo/tree/main/foo/bar
+         → ("https://github.com/user/repo", "main", "foo/bar")
+    """
+    import re
+    m = re.match(
+        rf"(https://{re.escape(host)}/[^/]+/[^/]+)(?:/tree/([^/]+)(?:/(.+?))?)?/?$",
+        url.rstrip("/"),
+    )
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    return url.rstrip("/"), None, None
 
 
 class Provider(ABC):

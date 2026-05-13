@@ -2,7 +2,7 @@ import os
 import re
 from pathlib import Path
 
-from .base import CloneResult, Provider
+from .base import CloneResult, Provider, parse_tree_url
 
 
 class GitLabProvider(Provider):
@@ -13,19 +13,23 @@ class GitLabProvider(Provider):
         return "gitlab.com" in url
 
     def check_access(self, keys_dir: Path) -> CloneResult:
+        repo_url, branch, subdir = parse_tree_url(self.url, "gitlab.com")
+        ssh_url = _to_ssh(repo_url)
+
         key = self._find_ssh_key(keys_dir, "gitlab")
         if key:
             return CloneResult(
-                url=_to_ssh(self.url),
-                display_url=_to_ssh(self.url),
-                has_auth=True,
-                ssh_key=key,
+                url=ssh_url, display_url=ssh_url,
+                has_auth=True, ssh_key=key, branch=branch, subdir=subdir,
             )
         token = os.environ.get("GITLAB_TOKEN") or _read_file(keys_dir / "gitlab.token")
         if token:
-            clone_url = self.url.replace("https://", f"https://oauth2:{token}@", 1)
-            return CloneResult(url=clone_url, display_url=_mask(clone_url), has_auth=True)
-        return CloneResult(url=self.url, display_url=self.url, has_auth=False)
+            clone_url = repo_url.replace("https://", f"https://oauth2:{token}@", 1)
+            return CloneResult(
+                url=clone_url, display_url=_mask(clone_url),
+                has_auth=True, branch=branch, subdir=subdir,
+            )
+        return CloneResult(url=repo_url, display_url=repo_url, branch=branch, subdir=subdir)
 
     def credential_hint(self) -> str:
         return (

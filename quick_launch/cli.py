@@ -18,8 +18,20 @@ from quick_launch import __version__
 from quick_launch import config, providers
 from quick_launch import cloner, credentials, env_manager, readme, sandbox
 
-app = typer.Typer(help="Quickly clone and sandbox any git project.", no_args_is_help=True)
+app = typer.Typer(
+    help="Quickly clone and sandbox any git project.",
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
 console = Console()
+
+
+@app.callback()
+def root(ctx: typer.Context) -> None:
+    """Show interactive TUI when called with no subcommand."""
+    if ctx.invoked_subcommand is None:
+        from quick_launch import tui
+        tui.run()
 
 _TOTAL_STEPS = 5
 
@@ -72,22 +84,57 @@ def _step(n: int, name: str) -> Generator[None, None, None]:
         raise
 
 
+def _wsl_ip() -> str | None:
+    """Return WSL2 host IP (Windows host) if running inside WSL2, else None."""
+    try:
+        data = Path("/etc/resolv.conf").read_text()
+        for line in data.splitlines():
+            if line.startswith("nameserver"):
+                ip = line.split()[-1]
+                if not ip.startswith("127."):
+                    return ip
+    except OSError:
+        pass
+    return None
+
+
+def _check_url(url: str) -> bool:
+    import urllib.request
+    try:
+        urllib.request.urlopen(url, timeout=2)  # noqa: S310
+        return True
+    except Exception:
+        return False
+
+
 def _print_summary(work_dir: Path, env_path: Path | None) -> None:
-    """Final panel: web URLs + auth credentials."""
+    """Final panel: web URLs (with reachability) + auth credentials."""
     lines: list[str] = []
 
-    # --- web URLs (running containers first, then from YAML if not started)
+    # --- web URLs (live from containers, fallback to compose YAML)
     web_urls = sandbox.get_web_urls(work_dir)
     if not web_urls:
         web_urls = sandbox.predict_urls(work_dir)
-        url_source = "predicted from compose"
+        url_source = "predicted"
     else:
         url_source = "live"
+
+    wsl = _wsl_ip()
 
     if web_urls:
         lines.append(f"[bold]Web interfaces[/bold] [dim]({url_source})[/dim]")
         for u in web_urls:
-            lines.append(f"  [link={u}][cyan]{u}[/cyan][/link]")
+            reachable = _check_url(u) if url_source == "live" else None
+            if reachable is True:
+                status_icon = "[green]✓[/green]"
+            elif reachable is False:
+                status_icon = "[red]✗[/red]"
+            else:
+                status_icon = "[dim]?[/dim]"
+            lines.append(f"  {status_icon} [link={u}][cyan]{u}[/cyan][/link]")
+            if wsl and reachable is False:
+                wsl_url = u.replace("localhost", wsl)
+                lines.append(f"     [dim]WSL2 host: {wsl_url}[/dim]")
 
     # --- auth vars from .env
     if env_path and env_path.exists():

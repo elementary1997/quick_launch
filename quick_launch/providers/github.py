@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 from .base import CloneResult, Provider
@@ -12,45 +13,36 @@ class GitHubProvider(Provider):
         return "github.com" in url
 
     def check_access(self, keys_dir: Path) -> CloneResult:
-        token = (
-            os.environ.get("GITHUB_TOKEN")
-            or _read_token_file(keys_dir / "github.token")
-        )
+        key = self._find_ssh_key(keys_dir, "github")
+        if key:
+            return CloneResult(
+                url=_to_ssh(self.url),
+                display_url=_to_ssh(self.url),
+                has_auth=True,
+                ssh_key=key,
+            )
+        token = os.environ.get("GITHUB_TOKEN") or _read_file(keys_dir / "github.token")
         if token:
-            clone_url = _inject_token(self.url, token)
-            display = _strip_token(clone_url)
-            return CloneResult(url=clone_url, display_url=display, has_auth=True)
-        key = keys_dir / "github_rsa"
-        if key.exists():
-            return CloneResult(url=_to_ssh(self.url), display_url=_to_ssh(self.url), has_auth=True)
+            clone_url = self.url.replace("https://", f"https://{token}@", 1)
+            return CloneResult(url=clone_url, display_url=_mask(clone_url), has_auth=True)
         return CloneResult(url=self.url, display_url=self.url, has_auth=False)
 
     def credential_hint(self) -> str:
         return (
-            "GitHub: set GITHUB_TOKEN env var, or place a personal access token in\n"
-            "  keys/github.token, or add an SSH key at keys/github_rsa"
+            "GitHub: SSH key at keys/github_ed25519 or keys/github_rsa (or ~/.ssh/id_*),\n"
+            "  or GITHUB_TOKEN env var / keys/github.token"
         )
 
 
-def _inject_token(url: str, token: str) -> str:
-    if url.startswith("https://"):
-        return url.replace("https://", f"https://{token}@", 1)
-    return url
-
-
-def _strip_token(url: str) -> str:
-    import re
-    return re.sub(r"https://[^@]+@", "https://***@", url)
-
-
 def _to_ssh(url: str) -> str:
-    # https://github.com/user/repo  ->  git@github.com:user/repo.git
     url = url.rstrip("/").removesuffix(".git")
     parts = url.replace("https://github.com/", "").split("/")
     return f"git@github.com:{'/'.join(parts)}.git"
 
 
-def _read_token_file(path: Path) -> str:
-    if path.exists():
-        return path.read_text().strip()
-    return ""
+def _mask(url: str) -> str:
+    return re.sub(r"https://[^@]+@", "https://***@", url)
+
+
+def _read_file(path: Path) -> str:
+    return path.read_text().strip() if path.exists() else ""

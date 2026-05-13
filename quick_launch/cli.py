@@ -23,12 +23,12 @@ from quick_launch import cloner, credentials, env_manager, readme, sandbox
 app = typer.Typer(help="Quickly clone and sandbox any git project.", no_args_is_help=True)
 console = Console()
 
-# Token file names per provider (for interactive prompt)
-_TOKEN_FILES: dict[str, str] = {
-    "GitHub": "github.token",
-    "GitLab": "gitlab.token",
-    "GitFlic": "gitflic.token",
-    "Bitbucket": "bitbucket.token",
+# Destination key filename per provider (used when copying a key interactively)
+_PROVIDER_KEY_FILE: dict[str, str] = {
+    "GitHub": "github_ed25519",
+    "GitLab": "gitlab_ed25519",
+    "GitFlic": "gitflic_ed25519",
+    "Bitbucket": "bitbucket_ed25519",
 }
 
 
@@ -67,16 +67,20 @@ def launch(
     config.KEYS_DIR.mkdir(exist_ok=True)
     clone_result = provider.check_access(config.KEYS_DIR)
 
-    # Interactive token prompt when no credentials were found
+    # Interactive SSH key selection when no credentials were found
     if not clone_result.has_auth:
-        token_file = _TOKEN_FILES.get(provider.name)
-        if token_file:
-            token = credentials.ask_and_save(provider.name, config.KEYS_DIR, token_file)
-            if token:
-                # Re-check with freshly saved token
+        dest_key_name = _PROVIDER_KEY_FILE.get(provider.name)
+        if dest_key_name:
+            key = credentials.ask_for_ssh_key(provider.name, config.KEYS_DIR, dest_key_name)
+            if key:
                 clone_result = provider.check_access(config.KEYS_DIR)
 
-    auth_label = "[green]token/key[/green]" if clone_result.has_auth else "[yellow]none — public repo[/yellow]"
+    if clone_result.ssh_key:
+        auth_label = f"[green]SSH key[/green] [dim]({clone_result.ssh_key})[/dim]"
+    elif clone_result.has_auth:
+        auth_label = "[green]token[/green]"
+    else:
+        auth_label = "[yellow]none — public repo[/yellow]"
     console.print(
         Panel(
             f"Provider : [bold]{provider.name}[/bold]\n"
@@ -91,7 +95,7 @@ def launch(
     config.SANDBOXES_DIR.mkdir(exist_ok=True)
     dest = _sandbox_path(url)
     try:
-        cloner.clone(clone_result.url, clone_result.display_url, dest)
+        cloner.clone(clone_result.url, clone_result.display_url, dest, ssh_key=clone_result.ssh_key)
     except Exception as e:
         console.print(f"[red]Clone failed: {e}[/red]")
         console.print(f"\n[dim]{provider.credential_hint()}[/dim]")

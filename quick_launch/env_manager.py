@@ -18,6 +18,11 @@ _AUTH_PATTERNS = re.compile(
 _EXAMPLE_CANDIDATES = [".env.example", ".env.sample", ".env.template", ".env.dist"]
 
 
+def get_auth_vars(env_path: Path) -> dict[str, str]:
+    """Return only auth-related key/value pairs from a .env file."""
+    return {k: v for k, v in _parse(env_path).items() if _AUTH_PATTERNS.search(k)}
+
+
 def prepare(repo_dir: Path) -> Path | None:
     """Find .env.example, copy to .env if missing, fill blanks, display summary."""
     env_path = repo_dir / ".env"

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quick-launch"
+version = "0.1.0"
+description = "Quickly clone, configure and launch projects in a Docker sandbox"
+requires-python = ">=3.10"
+dependencies = [
+    "typer[all]>=0.12",
+    "rich>=13.7",
+    "gitpython>=3.1",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+ql = "quick_launch.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quick_launch*"]

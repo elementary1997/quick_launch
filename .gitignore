@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Secrets & keys
+keys/
+*.pem
+*.key
+*.ppk
+.env
+.env.local
+*.token
+
+# Sandboxes (cloned repos)
+sandboxes/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

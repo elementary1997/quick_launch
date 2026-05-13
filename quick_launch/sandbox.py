@@ -1,10 +1,12 @@
 """Docker Compose sandbox management."""
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from quick_launch import port_manager
@@ -12,41 +14,68 @@ from quick_launch import port_manager
 console = Console()
 
 _COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
+_SKIP_DIRS = {"node_modules", "vendor", ".git", "__pycache__", ".venv", "venv", "dist", "build"}
 
 
 def find_compose(repo_dir: Path) -> Path | None:
+    """
+    Find compose file: check repo_dir first, then recurse up to 3 levels deep.
+    Skips common non-project directories (node_modules, .git, etc.).
+    """
+    # Direct check first (fastest path)
     for name in _COMPOSE_FILES:
         p = repo_dir / name
         if p.exists():
             return p
+
+    # Recursive search — breadth-first so closest file wins
+    queue: list[tuple[Path, int]] = [(repo_dir, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        if depth >= 3:
+            continue
+        try:
+            children = sorted(current.iterdir())
+        except PermissionError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name in _SKIP_DIRS:
+                continue
+            for name in _COMPOSE_FILES:
+                p = child / name
+                if p.exists():
+                    return p
+            queue.append((child, depth + 1))
+
     return None
 
 
 def up(repo_dir: Path, detach: bool = True) -> bool:
     compose_file = find_compose(repo_dir)
     if not compose_file:
-        console.print("[yellow]  No docker-compose file found — skipping[/yellow]")
+        console.print("[yellow]  No compose file found — skipping sandbox[/yellow]")
         return False
 
-    console.print(f"  compose  : [cyan]{compose_file.name}[/cyan]")
+    # compose_file may be in a subdir — run everything relative to its parent
+    compose_dir = compose_file.parent
+    console.print(f"  compose  : [cyan]{compose_file.relative_to(repo_dir)}[/cyan]")
     _check_docker()
 
-    # Check and remap conflicting ports before starting
-    port_manager.ensure_ports_free(compose_file, repo_dir)
+    port_manager.ensure_ports_free(compose_file, compose_dir)
 
     cmd = ["docker", "compose", "-f", str(compose_file), "up", "--build"]
     if detach:
         cmd.append("-d")
 
     console.print(f"  command  : [dim]{' '.join(cmd)}[/dim]")
-    rc = _stream(cmd, cwd=repo_dir)
+    rc = _stream(cmd, cwd=compose_dir)
 
     if rc != 0:
         console.print("[red]  ✗ docker compose up failed[/red]")
         return False
 
     if detach:
-        _verify_containers(repo_dir, compose_file)
+        _wait_for_healthy(compose_dir, compose_file)
 
     return True
 
@@ -54,17 +83,18 @@ def up(repo_dir: Path, detach: bool = True) -> bool:
 def down(repo_dir: Path) -> None:
     compose_file = find_compose(repo_dir)
     if not compose_file:
+        console.print(f"[yellow]No compose file found under {repo_dir.name}[/yellow]")
         return
-    subprocess.run(["docker", "compose", "-f", str(compose_file), "down"], cwd=repo_dir)
+    subprocess.run(["docker", "compose", "-f", str(compose_file), "down"], cwd=compose_file.parent)
     console.print("[green]✓ Sandbox stopped[/green]")
 
 
 def status(repo_dir: Path) -> None:
     compose_file = find_compose(repo_dir)
     if not compose_file:
-        console.print("[dim]No compose file[/dim]")
+        console.print(f"[dim]No compose file found under {repo_dir.name}[/dim]")
         return
-    _print_status(repo_dir, compose_file)
+    _print_status(compose_file.parent, compose_file)
 
 
 def predict_urls(repo_dir: Path) -> list[str]:
@@ -72,7 +102,7 @@ def predict_urls(repo_dir: Path) -> list[str]:
     compose_file = find_compose(repo_dir)
     if not compose_file:
         return []
-    ports = port_manager.get_effective_ports(compose_file, repo_dir)
+    ports = port_manager.get_effective_ports(compose_file, compose_file.parent)
     return _ports_to_urls(ports)
 
 
@@ -84,7 +114,7 @@ def get_web_urls(repo_dir: Path) -> list[str]:
 
     result = subprocess.run(
         ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json"],
-        cwd=repo_dir, capture_output=True, text=True,
+        cwd=compose_file.parent, capture_output=True, text=True,
     )
     if result.returncode != 0:
         return []
@@ -115,14 +145,64 @@ def _ports_to_urls(ports: list[tuple[str, int, int]]) -> list[str]:
     return sorted(urls)
 
 
-def _verify_containers(repo_dir: Path, compose_file: Path) -> None:
-    """Check container states and show a status table after detached start."""
+def _wait_for_healthy(compose_dir: Path, compose_file: Path, timeout: int = 60) -> None:
+    """
+    Poll container states after detached start.
+    Shows a live spinner and exits early once all containers are running.
+    """
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("  [cyan]{task.description}[/cyan]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as bar:
+        task = bar.add_task("Waiting for containers to start…", total=None)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            states = _get_states(compose_dir, compose_file)
+            if not states:
+                time.sleep(2)
+                continue
+
+            running = sum(1 for s in states.values() if s == "running")
+            total = len(states)
+            bar.update(task, description=f"Starting containers… {running}/{total} running")
+
+            if all(s == "running" for s in states.values()):
+                break
+            if any(s in ("exited", "dead") for s in states.values()):
+                break
+            time.sleep(2)
+
+    _verify_containers(compose_dir, compose_file)
+
+
+def _get_states(compose_dir: Path, compose_file: Path) -> dict[str, str]:
     result = subprocess.run(
         ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json"],
-        cwd=repo_dir, capture_output=True, text=True,
+        cwd=compose_dir, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return {}
+    states: dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        try:
+            svc = json.loads(line)
+            states[svc.get("Service", "?")] = svc.get("State", "?")
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return states
+
+
+def _verify_containers(compose_dir: Path, compose_file: Path) -> None:
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json"],
+        cwd=compose_dir, capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        _print_status(repo_dir, compose_file)
+        _print_status(compose_dir, compose_file)
         return
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
@@ -130,7 +210,7 @@ def _verify_containers(repo_dir: Path, compose_file: Path) -> None:
     table.add_column("State")
     table.add_column("Ports", style="dim")
 
-    any_unhealthy = False
+    any_problem = False
     for line in result.stdout.strip().splitlines():
         try:
             svc = json.loads(line)
@@ -139,41 +219,38 @@ def _verify_containers(repo_dir: Path, compose_file: Path) -> None:
             health = svc.get("Health", "")
             publishers = svc.get("Publishers") or []
 
-            port_strs = []
-            for p in publishers:
-                h = p.get("PublishedPort", 0)
-                c = p.get("TargetPort", 0)
-                if h:
-                    port_strs.append(f"{h}→{c}")
+            port_strs = [
+                f"{p['PublishedPort']}→{p['TargetPort']}"
+                for p in publishers if p.get("PublishedPort")
+            ]
 
             if state == "running":
-                state_str = "[green]running[/green]"
+                label = "[green]running[/green]"
                 if health == "healthy":
-                    state_str += " [green](healthy)[/green]"
+                    label += " [green](healthy)[/green]"
                 elif health == "unhealthy":
-                    state_str += " [red](unhealthy)[/red]"
-                    any_unhealthy = True
+                    label += " [red](unhealthy)[/red]"
+                    any_problem = True
             else:
-                state_str = f"[red]{state}[/red]"
-                any_unhealthy = True
+                label = f"[red]{state}[/red]"
+                any_problem = True
 
-            table.add_row(name, state_str, "  ".join(port_strs))
+            table.add_row(name, label, "  ".join(port_strs))
         except (json.JSONDecodeError, KeyError):
             pass
 
     console.print(table)
-
-    if any_unhealthy:
+    if any_problem:
         console.print(
-            "  [yellow]⚠ Some containers are not healthy.[/yellow] "
-            "Check logs: [dim]docker compose logs -f[/dim]"
+            "  [yellow]⚠ Some containers failed.[/yellow] "
+            "Check logs: [dim]docker compose logs --tail=50[/dim]"
         )
 
 
-def _print_status(repo_dir: Path, compose_file: Path) -> None:
+def _print_status(compose_dir: Path, compose_file: Path) -> None:
     result = subprocess.run(
         ["docker", "compose", "-f", str(compose_file), "ps"],
-        cwd=repo_dir, capture_output=True, text=True,
+        cwd=compose_dir, capture_output=True, text=True,
     )
     if result.stdout.strip():
         console.print(Panel(

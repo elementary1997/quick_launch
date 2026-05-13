@@ -98,20 +98,25 @@ def _wsl_ip() -> str | None:
     return None
 
 
-def _check_url(url: str) -> bool:
+def _check_url(url: str, retries: int = 5, delay: float = 2.0) -> bool:
+    """Try to reach url, retrying up to `retries` times."""
     import urllib.request
-    try:
-        urllib.request.urlopen(url, timeout=2)  # noqa: S310
-        return True
-    except Exception:
-        return False
+    for _ in range(retries):
+        try:
+            urllib.request.urlopen(url, timeout=3)  # noqa: S310
+            return True
+        except Exception:
+            import time as _t
+            _t.sleep(delay)
+    return False
 
 
 def _print_summary(work_dir: Path, env_path: Path | None) -> None:
     """Final panel: web URLs (with reachability) + auth credentials."""
+    import time as _t
     lines: list[str] = []
 
-    # --- web URLs (live from containers, fallback to compose YAML)
+    # --- web URLs: live from running containers, fallback to compose YAML
     web_urls = sandbox.get_web_urls(work_dir)
     if not web_urls:
         web_urls = sandbox.predict_urls(work_dir)
@@ -124,17 +129,27 @@ def _print_summary(work_dir: Path, env_path: Path | None) -> None:
     if web_urls:
         lines.append(f"[bold]Web interfaces[/bold] [dim]({url_source})[/dim]")
         for u in web_urls:
-            reachable = _check_url(u) if url_source == "live" else None
-            if reachable is True:
-                status_icon = "[green]✓[/green]"
-            elif reachable is False:
-                status_icon = "[red]✗[/red]"
+            if url_source == "live":
+                reachable = _check_url(u, retries=6, delay=2.0)
             else:
-                status_icon = "[dim]?[/dim]"
-            lines.append(f"  {status_icon} [link={u}][cyan]{u}[/cyan][/link]")
-            if wsl and reachable is False:
+                reachable = None
+
+            if reachable is True:
+                icon = "[green]✓[/green]"
+            elif reachable is False:
+                icon = "[red]✗[/red]"
+            else:
+                icon = "[dim]~[/dim]"
+
+            lines.append(f"  {icon} [link={u}][cyan]{u}[/cyan][/link]")
+
+            # Always show WSL IP so Windows browser users know which URL to use
+            if wsl:
                 wsl_url = u.replace("localhost", wsl)
-                lines.append(f"     [dim]WSL2 host: {wsl_url}[/dim]")
+                if reachable is False:
+                    lines.append(f"      [yellow]→ try in Windows browser: {wsl_url}[/yellow]")
+                else:
+                    lines.append(f"      [dim]Windows: {wsl_url}[/dim]")
 
     # --- auth vars from .env
     if env_path and env_path.exists():
@@ -272,29 +287,80 @@ def status(
 
 @app.command(name="list")
 def list_sandboxes() -> None:
-    """List all local sandboxes."""
+    """List all local sandboxes, expanding monorepos to individual projects."""
     config.SANDBOXES_DIR.mkdir(exist_ok=True)
-    entries = sorted(
+    top_dirs = sorted(
         (s for s in config.SANDBOXES_DIR.iterdir() if s.is_dir()),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    if not entries:
+    if not top_dirs:
         console.print("[dim]No sandboxes yet. Run: ql launch <repo-url>[/dim]")
         return
 
-    table = Table(title="Local sandboxes", header_style="bold magenta", show_lines=False)
-    table.add_column("Name", style="cyan")
-    table.add_column("Compose file")
-    table.add_column("Predicted URLs", style="dim")
-    table.add_column("Path", style="dim")
+    table = Table(title="Local sandboxes", header_style="bold magenta", show_lines=True)
+    table.add_column("Sandbox", style="cyan", no_wrap=True, min_width=28)
+    table.add_column("Ports", no_wrap=True)
 
-    for s in entries:
-        compose = sandbox.find_compose(s)
-        urls = ", ".join(sandbox.predict_urls(s)) if compose else ""
-        table.add_row(s.name, compose.name if compose else "—", urls, str(s))
+    for top in top_dirs:
+        compose = _direct_compose(top)
+        if compose:
+            ports = _url_ports(sandbox.predict_urls(top))
+            table.add_row(top.name, ports)
+        else:
+            sub_projects = _find_sub_projects(top)
+            if not sub_projects:
+                table.add_row(f"[dim]{top.name}[/dim]", "[dim]no compose file[/dim]")
+            else:
+                for i, (sub_dir, _) in enumerate(sub_projects):
+                    if i == 0:
+                        label = f"{top.name}/[bold]{sub_dir.name}[/bold]"
+                    else:
+                        label = f"  [dim]/[/dim][bold]{sub_dir.name}[/bold]"
+                    ports = _url_ports(sandbox.predict_urls(sub_dir))
+                    table.add_row(label, ports)
 
     console.print(table)
+
+
+def _url_ports(urls: list[str]) -> str:
+    """Convert ['http://localhost:3000', ...] → ':3000  :9090'"""
+    import re
+    ports = []
+    for u in urls:
+        m = re.search(r":(\d+)$", u)
+        if m:
+            proto = "https" if "https" in u else "http"
+            ports.append(f"[cyan]:{m.group(1)}[/cyan][dim]/{proto}[/dim]")
+    return "  ".join(ports)
+
+
+def _direct_compose(repo_dir: Path) -> Path | None:
+    """Return compose file only if it sits directly in repo_dir (not in a subdir)."""
+    from quick_launch.sandbox import _COMPOSE_FILES
+    for name in _COMPOSE_FILES:
+        p = repo_dir / name
+        if p.exists():
+            return p
+    return None
+
+
+def _find_sub_projects(repo_dir: Path) -> list[tuple[Path, Path]]:
+    """Return [(subdir, compose_file), ...] for one level of subdirectories."""
+    from quick_launch.sandbox import _COMPOSE_FILES, _SKIP_DIRS
+    results = []
+    try:
+        for child in sorted(repo_dir.iterdir()):
+            if not child.is_dir() or child.name in _SKIP_DIRS:
+                continue
+            for name in _COMPOSE_FILES:
+                p = child / name
+                if p.exists():
+                    results.append((child, p))
+                    break
+    except PermissionError:
+        pass
+    return results
 
 
 @app.command()

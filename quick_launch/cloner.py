@@ -13,7 +13,9 @@ def clone(
     ssh_key: Path | None = None,
     branch: str | None = None,
 ) -> git.Repo:
-    env = _ssh_env(ssh_key) if ssh_key else None
+    # Use custom GIT_SSH_COMMAND only for keys in our own keys/ directory.
+    # For ~/.ssh/ keys the system SSH agent already handles everything.
+    env = _ssh_env(ssh_key) if ssh_key and not _is_system_key(ssh_key) else None
 
     if dest.exists() and any(dest.iterdir()):
         console.print("[yellow]Already cloned — pulling latest changes...[/yellow]")
@@ -24,7 +26,7 @@ def clone(
         return repo
 
     console.print(f"[cyan]Cloning[/cyan] {display_url} → {dest}")
-    if ssh_key:
+    if ssh_key and not _is_system_key(ssh_key):
         console.print(f"[dim]SSH key: {ssh_key}[/dim]")
 
     kwargs: dict = {"env": env, "progress": _Progress()}
@@ -36,11 +38,17 @@ def clone(
     return repo
 
 
+def _is_system_key(key: Path) -> bool:
+    """True when the key lives in ~/.ssh/ — system agent handles auth, no override needed."""
+    try:
+        return key.resolve().is_relative_to(Path.home() / ".ssh")
+    except ValueError:
+        return False
+
+
 def _ssh_env(key: Path) -> dict[str, str]:
     return {
-        "GIT_SSH_COMMAND": (
-            f"ssh -i {key} -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
-        )
+        "GIT_SSH_COMMAND": f"ssh -i {key} -o StrictHostKeyChecking=no"
     }
 
 

@@ -1,53 +1,62 @@
 # quick-launch `ql`
 
-One command to clone any git project and run it in a Docker sandbox.
+Один командой клонируй любой git-репозиторий и запускай его в Docker-песочнице.
 
 ```
 ql launch https://github.com/user/myproject
 ```
 
-What happens:
-1. **Access check** — detects GitHub / Bitbucket / GitFlic, finds your token or SSH key
-2. **Clone** — clones into `sandboxes/myproject/`
-3. **README** — renders the project README in your terminal
-4. **Env** — reads `.env.example`, creates `.env`, highlights auth params
-5. **Sandbox** — runs `docker compose up --build -d`
+## Что происходит
 
-## Install
+1. **Проверка доступа** — определяет провайдер (GitHub / GitLab / Bitbucket / GitFlic), ищет токен или SSH-ключ. Если не найден — спрашивает интерактивно
+2. **Клонирование** — клонирует в `sandboxes/myproject/` (или делает `pull`, если уже есть)
+3. **README** — рендерит README проекта прямо в терминале
+4. **Окружение** — читает `.env.example`, создаёт `.env` с дефолтами, выводит таблицу с auth-параметрами
+5. **Песочница** — запускает `docker compose up --build -d`
+
+## Установка
 
 ```bash
 git clone https://github.com/elementary1997/quick_launch
 cd quick_launch
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 ql --help
 ```
 
-## Credentials
+## Учётные данные
 
-Place your tokens in the `keys/` folder (gitignored) or set env vars:
+Токены хранятся в папке `keys/` (в `.gitignore`) или передаются через переменные окружения:
 
-| Provider  | Env var | File |
-|-----------|---------|------|
-| GitHub    | `GITHUB_TOKEN` | `keys/github.token` |
+| Провайдер | Переменная окружения | Файл |
+|-----------|----------------------|------|
+| GitHub    | `GITHUB_TOKEN`       | `keys/github.token` |
+| GitLab    | `GITLAB_TOKEN`       | `keys/gitlab.token` |
 | Bitbucket | `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD` | `keys/bitbucket.{user,token}` |
-| GitFlic   | `GITFLIC_TOKEN` | `keys/gitflic.token` |
+| GitFlic   | `GITFLIC_TOKEN`      | `keys/gitflic.token` |
 
-SSH keys: `keys/github_rsa`, `keys/bitbucket_rsa`, `keys/gitflic_rsa`
+SSH-ключи: `keys/github_rsa`, `keys/gitlab_rsa`, `keys/bitbucket_rsa`, `keys/gitflic_rsa`
 
-## Commands
-
-```
-ql launch <url>              Full pipeline
-ql launch <url> --no-sandbox Skip docker-compose
-ql launch <url> --fg         Attach to compose logs
-ql down   <url|name>         Stop sandbox
-ql status <url|name>         Show container status
-ql keys                      Show credential hints
+Пути можно переопределить через переменные окружения:
+```bash
+export QL_KEYS_DIR=/home/user/.ql/keys
+export QL_SANDBOXES_DIR=/home/user/.ql/sandboxes
 ```
 
-## Requirements
+## Команды
+
+```
+ql launch <url>              Полный пайплайн: клон → env → sandbox
+ql launch <url> --no-sandbox Пропустить docker-compose
+ql launch <url> --fg         Прикрепиться к выводу compose
+ql list                      Показать все локальные sandbox'ы
+ql down   <url|name>         Остановить sandbox
+ql status <url|name>         Статус контейнеров
+ql keys                      Подсказки по настройке учётных данных
+```
+
+## Требования
 
 - Python 3.10+
-- Docker with Compose v2 (`docker compose`)
+- Docker с Compose v2 (`docker compose`)
 - Git

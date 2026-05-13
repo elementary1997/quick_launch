@@ -5,8 +5,9 @@ from pathlib import Path
 
 @dataclass
 class CloneResult:
-    url: str          # final URL used for cloning (with credentials injected)
-    display_url: str  # URL safe to print (no secrets)
+    url: str           # final URL used for cloning (with credentials injected)
+    display_url: str   # URL safe to print (no secrets)
+    has_auth: bool = False  # True when a real credential was found/injected
 
 
 class Provider(ABC):

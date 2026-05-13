@@ -17,13 +17,13 @@ class BitbucketProvider(Provider):
 
         if user and password:
             clone_url = self.url.replace("https://", f"https://{user}:{password}@", 1)
-            return CloneResult(url=clone_url, display_url=self.url)
+            return CloneResult(url=clone_url, display_url=self.url, has_auth=True)
 
         key = keys_dir / "bitbucket_rsa"
         if key.exists():
-            return CloneResult(url=_to_ssh(self.url), display_url=_to_ssh(self.url))
+            return CloneResult(url=_to_ssh(self.url), display_url=_to_ssh(self.url), has_auth=True)
 
-        return CloneResult(url=self.url, display_url=self.url)
+        return CloneResult(url=self.url, display_url=self.url, has_auth=False)
 
     def credential_hint(self) -> str:
         return (

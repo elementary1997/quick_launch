@@ -19,13 +19,11 @@ class GitHubProvider(Provider):
         if token:
             clone_url = _inject_token(self.url, token)
             display = _strip_token(clone_url)
-            return CloneResult(url=clone_url, display_url=display)
-        # fall back to SSH if key exists
+            return CloneResult(url=clone_url, display_url=display, has_auth=True)
         key = keys_dir / "github_rsa"
         if key.exists():
-            return CloneResult(url=_to_ssh(self.url), display_url=_to_ssh(self.url))
-        # public / no auth
-        return CloneResult(url=self.url, display_url=self.url)
+            return CloneResult(url=_to_ssh(self.url), display_url=_to_ssh(self.url), has_auth=True)
+        return CloneResult(url=self.url, display_url=self.url, has_auth=False)
 
     def credential_hint(self) -> str:
         return (

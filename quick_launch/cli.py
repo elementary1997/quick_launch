@@ -4,6 +4,7 @@ Usage:
     ql launch <repo-url>       Clone, configure env, and spin up docker-compose
     ql down <repo-url|name>    Stop the sandbox
     ql status <repo-url|name>  Show sandbox container status
+    ql list                    List all local sandboxes
     ql keys                    Show credential status for all providers
 """
 from pathlib import Path
@@ -13,29 +14,41 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.table import Table
 
 from quick_launch import __version__
-from quick_launch import providers
-from quick_launch import cloner, env_manager, readme, sandbox
+from quick_launch import config, providers
+from quick_launch import cloner, credentials, env_manager, readme, sandbox
 
 app = typer.Typer(help="Quickly clone and sandbox any git project.", no_args_is_help=True)
 console = Console()
 
-KEYS_DIR = Path(__file__).parent.parent / "keys"
-SANDBOXES_DIR = Path(__file__).parent.parent / "sandboxes"
+# Token file names per provider (for interactive prompt)
+_TOKEN_FILES: dict[str, str] = {
+    "GitHub": "github.token",
+    "GitLab": "gitlab.token",
+    "GitFlic": "gitflic.token",
+    "Bitbucket": "bitbucket.token",
+}
 
 
 def _repo_name(url: str) -> str:
-    return url.rstrip("/").rstrip(".git").split("/")[-1]
+    return url.rstrip("/").removesuffix(".git").split("/")[-1]
 
 
 def _sandbox_path(url: str) -> Path:
-    return SANDBOXES_DIR / _repo_name(url)
+    return config.SANDBOXES_DIR / _repo_name(url)
+
+
+def _resolve_path(url_or_name: str) -> Path:
+    if "://" in url_or_name:
+        return _sandbox_path(url_or_name)
+    return config.SANDBOXES_DIR / url_or_name
 
 
 @app.command()
 def launch(
-    url: Annotated[str, typer.Argument(help="Repository URL (GitHub / Bitbucket / GitFlic)")],
+    url: Annotated[str, typer.Argument(help="Repository URL (GitHub / GitLab / Bitbucket / GitFlic)")],
     no_sandbox: Annotated[bool, typer.Option("--no-sandbox", help="Skip docker-compose")] = False,
     no_readme: Annotated[bool, typer.Option("--no-readme", help="Skip README display")] = False,
     foreground: Annotated[bool, typer.Option("--fg", help="Run docker-compose in foreground")] = False,
@@ -51,20 +64,31 @@ def launch(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-    KEYS_DIR.mkdir(exist_ok=True)
-    clone_result = provider.check_access(KEYS_DIR)
+    config.KEYS_DIR.mkdir(exist_ok=True)
+    clone_result = provider.check_access(config.KEYS_DIR)
+
+    # Interactive token prompt when no credentials were found
+    if not clone_result.has_auth:
+        token_file = _TOKEN_FILES.get(provider.name)
+        if token_file:
+            token = credentials.ask_and_save(provider.name, config.KEYS_DIR, token_file)
+            if token:
+                # Re-check with freshly saved token
+                clone_result = provider.check_access(config.KEYS_DIR)
+
+    auth_label = "[green]token/key[/green]" if clone_result.has_auth else "[yellow]none — public repo[/yellow]"
     console.print(
         Panel(
             f"Provider : [bold]{provider.name}[/bold]\n"
             f"Clone URL: {clone_result.display_url}\n"
-            f"Auth     : {'[green]token/key[/green]' if clone_result.url != url else '[yellow]none (public?)[/yellow]'}",
+            f"Auth     : {auth_label}",
             border_style="cyan",
         )
     )
 
     # 2. Clone
     console.print(Rule("2 / Clone"))
-    SANDBOXES_DIR.mkdir(exist_ok=True)
+    config.SANDBOXES_DIR.mkdir(exist_ok=True)
     dest = _sandbox_path(url)
     try:
         cloner.clone(clone_result.url, clone_result.display_url, dest)
@@ -97,8 +121,7 @@ def down(
     url_or_name: Annotated[str, typer.Argument(help="Repo URL or sandbox name")],
 ) -> None:
     """Stop a running sandbox."""
-    dest = _resolve_path(url_or_name)
-    sandbox.down(dest)
+    sandbox.down(_resolve_path(url_or_name))
 
 
 @app.command()
@@ -106,34 +129,52 @@ def status(
     url_or_name: Annotated[str, typer.Argument(help="Repo URL or sandbox name")],
 ) -> None:
     """Show container status for a sandbox."""
-    dest = _resolve_path(url_or_name)
-    sandbox.status(dest)
+    sandbox.status(_resolve_path(url_or_name))
+
+
+@app.command(name="list")
+def list_sandboxes() -> None:
+    """List all local sandboxes with their compose status."""
+    config.SANDBOXES_DIR.mkdir(exist_ok=True)
+    sandboxes = sorted(config.SANDBOXES_DIR.iterdir()) if config.SANDBOXES_DIR.exists() else []
+
+    if not sandboxes:
+        console.print("[dim]No sandboxes yet. Run: ql launch <repo-url>[/dim]")
+        return
+
+    table = Table(title="Local sandboxes", show_lines=False, header_style="bold magenta")
+    table.add_column("Name", style="cyan")
+    table.add_column("Compose file")
+    table.add_column("Path", style="dim")
+
+    for s in sandboxes:
+        if not s.is_dir():
+            continue
+        compose = sandbox.find_compose(s)
+        table.add_row(
+            s.name,
+            compose.name if compose else "[dim]—[/dim]",
+            str(s),
+        )
+
+    console.print(table)
 
 
 @app.command()
 def keys() -> None:
     """Show credential status for all supported providers."""
-    KEYS_DIR.mkdir(exist_ok=True)
-    table_data = []
+    config.KEYS_DIR.mkdir(exist_ok=True)
+
+    table = Table(title="Credential hints", show_lines=True)
+    table.add_column("Provider", style="cyan")
+    table.add_column("How to configure")
+
     for cls in providers.PROVIDERS:
         inst = cls.__new__(cls)
         inst.url = ""
-        hint = inst.credential_hint()
-        table_data.append((cls.name, hint))
+        table.add_row(cls.name, inst.credential_hint())
 
-    from rich.table import Table
-    t = Table(title="Credential hints", show_lines=True)
-    t.add_column("Provider", style="cyan")
-    t.add_column("How to configure")
-    for name, hint in table_data:
-        t.add_row(name, hint)
-    console.print(t)
-
-
-def _resolve_path(url_or_name: str) -> Path:
-    if "/" in url_or_name and "://" in url_or_name:
-        return _sandbox_path(url_or_name)
-    return SANDBOXES_DIR / url_or_name
+    console.print(table)
 
 
 if __name__ == "__main__":
